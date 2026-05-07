@@ -66,22 +66,41 @@ echo "---------------------------"
 echo "If it isn't there already, add it at: https://github.com/settings/ssh/new"
 read_tty _CONTINUE "Press Enter once the key is added..."
 
+echo
+echo "verifying GitHub SSH access..."
 mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 if ! grep -q "^github.com " "$HOME/.ssh/known_hosts" 2>/dev/null; then
-  ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+  # Don't let a transient ssh-keyscan failure tank the whole script under
+  # `set -e` — fall through to StrictHostKeyChecking=accept-new on the
+  # actual ssh call instead.
+  ssh-keyscan -T 5 -t ed25519,rsa,ecdsa github.com 2>/dev/null \
+    >> "$HOME/.ssh/known_hosts" \
+    || echo "  (ssh-keyscan didn't add a host key; will rely on accept-new)"
 fi
 
 # ssh -T to GitHub always exits non-zero ("no shell access"), so check the
 # success phrase in the output instead of the exit code.
-ssh_output=$(ssh -T -o BatchMode=yes git@github.com 2>&1 || true)
+ssh_output=$(ssh -T \
+  -o BatchMode=yes \
+  -o ConnectTimeout=10 \
+  -o StrictHostKeyChecking=accept-new \
+  git@github.com 2>&1 || true)
 if ! echo "$ssh_output" | grep -q "successfully authenticated"; then
-  echo "SSH to GitHub failed:"
+  echo
+  echo "================================================================"
+  echo "SSH to git@github.com did not succeed. ssh said:"
+  echo
   echo "$ssh_output"
   echo
-  echo "Confirm the key was added on GitHub, then re-run."
+  echo "Common causes:"
+  echo "  - The SSH key wasn't actually added on https://github.com/settings/ssh"
+  echo "  - Outbound port 22 is blocked on this network"
+  echo "  - The wrong key was added (compare against the line printed above)"
+  echo "================================================================"
   exit 1
 fi
-echo "SSH auth OK."
+echo "  SSH auth OK."
 
 echo "[4/5] cloning DevOps repo to $REPO_DIR..."
 mkdir -p "$(dirname "$REPO_DIR")"
