@@ -13,7 +13,9 @@
 # Usage on a fresh VM:
 #   curl -fsSL https://raw.githubusercontent.com/GEWA-codecrushers/devops-bootstrap/main/bootstrap.sh | bash
 
-set -e
+set -Ee
+# Surface any silent `set -e` exit with the line number that triggered it.
+trap 'echo "[bootstrap] aborting: line $LINENO returned exit code $?" >&2' ERR
 trap 'echo "..Stopping....."; exit' INT
 
 if [ "$(id -u)" -eq 0 ]; then
