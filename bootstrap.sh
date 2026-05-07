@@ -13,10 +13,16 @@
 # Usage on a fresh VM:
 #   curl -fsSL https://raw.githubusercontent.com/GEWA-codecrushers/devops-bootstrap/main/bootstrap.sh | bash
 
+echo "[bootstrap] version: 2026-05-07-diag2 (instrumented)"
+echo "[bootstrap] bash: ${BASH_VERSION:-unknown}"
+
 set -Ee
 # Surface any silent `set -e` exit with the line number that triggered it.
-trap 'echo "[bootstrap] aborting: line $LINENO returned exit code $?" >&2' ERR
-trap 'echo "..Stopping....."; exit' INT
+trap 'rc=$?; echo "[bootstrap] aborting: line $LINENO returned exit code $rc" >&2' ERR
+trap 'echo "[bootstrap] received SIGINT — stopping."; exit 130' INT
+trap 'echo "[bootstrap] received SIGTERM — stopping."; exit 143' TERM
+trap 'echo "[bootstrap] received SIGHUP — stopping."; exit 129' HUP
+trap 'echo "[bootstrap] received SIGPIPE."; exit 141' PIPE
 
 if [ "$(id -u)" -eq 0 ]; then
   echo "Script can't run as root | Script kann nicht als Root ausgeführt werden"
@@ -70,31 +76,42 @@ read_tty _CONTINUE "Press Enter once the key is added..."
 
 echo
 echo "verifying GitHub SSH access..."
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
-if ! grep -q "^github.com " "$HOME/.ssh/known_hosts" 2>/dev/null; then
-  # Don't let a transient ssh-keyscan failure tank the whole script under
-  # `set -e` — fall through to StrictHostKeyChecking=accept-new on the
-  # actual ssh call instead.
-  ssh-keyscan -T 5 -t ed25519,rsa,ecdsa github.com 2>/dev/null \
-    >> "$HOME/.ssh/known_hosts" \
-    || echo "  (ssh-keyscan didn't add a host key; will rely on accept-new)"
+
+# Explicit, set-e-free diagnostics so we can pin down silent exits.
+set +e
+
+echo "  step 1/3: ensure ~/.ssh exists"
+mkdir -p "$HOME/.ssh"; rc=$?; echo "    mkdir exit=$rc"
+chmod 700 "$HOME/.ssh"; rc=$?; echo "    chmod exit=$rc"
+
+echo "  step 2/3: populate known_hosts"
+if grep -q "^github.com " "$HOME/.ssh/known_hosts" 2>/dev/null; then
+  echo "    known_hosts already has github.com — skipping ssh-keyscan"
+else
+  ssh_keyscan_err=$(ssh-keyscan -T 5 -t ed25519,rsa,ecdsa github.com 2>&1 \
+    >> "$HOME/.ssh/known_hosts")
+  rc=$?
+  echo "    ssh-keyscan exit=$rc"
+  [ -n "$ssh_keyscan_err" ] && echo "    ssh-keyscan stderr: $ssh_keyscan_err"
 fi
 
-# ssh -T to GitHub always exits non-zero ("no shell access"), so check the
-# success phrase in the output instead of the exit code.
+echo "  step 3/3: ssh -T git@github.com (10s timeout)"
 ssh_output=$(ssh -T \
   -o BatchMode=yes \
   -o ConnectTimeout=10 \
   -o StrictHostKeyChecking=accept-new \
-  git@github.com 2>&1 || true)
-if ! echo "$ssh_output" | grep -q "successfully authenticated"; then
+  git@github.com 2>&1)
+ssh_rc=$?
+echo "    ssh exit=$ssh_rc"
+echo "    ssh output:"
+printf '%s\n' "$ssh_output" | sed 's/^/      /'
+
+set -e
+
+if ! printf '%s' "$ssh_output" | grep -q "successfully authenticated"; then
   echo
   echo "================================================================"
-  echo "SSH to git@github.com did not succeed. ssh said:"
-  echo
-  echo "$ssh_output"
-  echo
+  echo "SSH to git@github.com did not succeed."
   echo "Common causes:"
   echo "  - The SSH key wasn't actually added on https://github.com/settings/ssh"
   echo "  - Outbound port 22 is blocked on this network"
