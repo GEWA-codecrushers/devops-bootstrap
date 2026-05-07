@@ -26,14 +26,21 @@ REPO_DIR="${DEVOPS_REPO:-$HOME/repo/DevOps}"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 # Read from the controlling terminal so prompts work under `curl ... | bash`
-# (where stdin is the piped script, not the keyboard).
+# (where stdin is the piped script, not the keyboard). Avoids bash-specific
+# `read -p` so the same code runs under zsh too. Drains any buffered
+# keystrokes first so a stray Enter from the previous step (e.g. while
+# apt-get was running) doesn't get auto-consumed and skip past the prompt.
 read_tty() {
   local var="$1" prompt="$2"
-  if [ -r /dev/tty ]; then
-    read -r -p "$prompt" "$var" < /dev/tty
-  else
-    read -r -p "$prompt" "$var"
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo "error: no controlling terminal — re-run from an interactive shell" >&2
+    exit 1
   fi
+  if [ -n "${BASH_VERSION:-}" ]; then
+    while read -r -t 0.05 -n 4096 _drain </dev/tty 2>/dev/null; do :; done
+  fi
+  printf '%s' "$prompt" >/dev/tty
+  IFS= read -r "$var" </dev/tty
 }
 
 echo "[1/5] installing prerequisites (sudo)..."
