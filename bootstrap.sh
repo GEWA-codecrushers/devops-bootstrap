@@ -81,11 +81,17 @@ fi
 # not provide shell access." and closes with status 1. The `|| true` keeps
 # `set -e` from killing the script on that expected non-zero exit; the
 # real success/failure decision is made by grepping the output.
+#
+# `</dev/null` is critical under `curl | bash`: ssh inherits stdin from
+# bash (which is the script pipe), and would otherwise consume the rest
+# of the script and forward it to GitHub. Bash then hits EOF on the next
+# line read and exits cleanly with code 0 — the exact "silent exit" bug
+# from issue #60.
 ssh_output=$(ssh -T \
   -o BatchMode=yes \
   -o ConnectTimeout=10 \
   -o StrictHostKeyChecking=accept-new \
-  git@github.com 2>&1 || true)
+  git@github.com </dev/null 2>&1 || true)
 if ! printf '%s' "$ssh_output" | grep -q "successfully authenticated"; then
   echo
   echo "================================================================"
@@ -104,14 +110,16 @@ echo "  SSH auth OK."
 
 echo "[4/5] cloning DevOps repo to $REPO_DIR..."
 mkdir -p "$(dirname "$REPO_DIR")"
+# Same `</dev/null` reasoning as ssh -T above: git's underlying ssh
+# would otherwise eat the rest of the script under `curl | bash`.
 if [ -d "$REPO_DIR/.git" ]; then
   echo "already present; pulling latest..."
-  git -C "$REPO_DIR" pull --ff-only
+  git -C "$REPO_DIR" pull --ff-only </dev/null
 elif [ -e "$REPO_DIR" ]; then
   echo "error: $REPO_DIR exists but is not a git repo. Move it aside and re-run."
   exit 1
 else
-  git clone "$REPO_SSH" "$REPO_DIR"
+  git clone "$REPO_SSH" "$REPO_DIR" </dev/null
 fi
 
 echo "[5/5] handing off to setup.sh..."
