@@ -26,14 +26,21 @@ REPO_DIR="${DEVOPS_REPO:-$HOME/repo/DevOps}"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 # Read from the controlling terminal so prompts work under `curl ... | bash`
-# (where stdin is the piped script, not the keyboard).
+# (where stdin is the piped script, not the keyboard). Avoids bash-specific
+# `read -p` so the same code runs under zsh too. Drains any buffered
+# keystrokes first so a stray Enter from the previous step (e.g. while
+# apt-get was running) doesn't get auto-consumed and skip past the prompt.
 read_tty() {
   local var="$1" prompt="$2"
-  if [ -r /dev/tty ]; then
-    read -r -p "$prompt" "$var" < /dev/tty
-  else
-    read -r -p "$prompt" "$var"
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    echo "error: no controlling terminal — re-run from an interactive shell" >&2
+    exit 1
   fi
+  if [ -n "${BASH_VERSION:-}" ]; then
+    while read -r -t 0.05 -n 4096 _drain </dev/tty 2>/dev/null; do :; done
+  fi
+  printf '%s' "$prompt" >/dev/tty
+  IFS= read -r "$var" </dev/tty
 }
 
 echo "[1/5] installing prerequisites (sudo)..."
@@ -59,33 +66,60 @@ echo "---------------------------"
 echo "If it isn't there already, add it at: https://github.com/settings/ssh/new"
 read_tty _CONTINUE "Press Enter once the key is added..."
 
+echo
+echo "verifying GitHub SSH access..."
 mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 if ! grep -q "^github.com " "$HOME/.ssh/known_hosts" 2>/dev/null; then
-  ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+  ssh-keyscan -T 5 -t ed25519,rsa,ecdsa github.com 2>/dev/null \
+    >> "$HOME/.ssh/known_hosts" \
+    || echo "  (ssh-keyscan didn't add a host key; will rely on accept-new)"
 fi
 
-# ssh -T to GitHub always exits non-zero ("no shell access"), so check the
-# success phrase in the output instead of the exit code.
-ssh_output=$(ssh -T -o BatchMode=yes git@github.com 2>&1 || true)
-if ! echo "$ssh_output" | grep -q "successfully authenticated"; then
-  echo "SSH to GitHub failed:"
+# `ssh -T git@github.com` ALWAYS exits 1 even on successful auth — GitHub
+# replies "Hi <user>! You've successfully authenticated, but GitHub does
+# not provide shell access." and closes with status 1. The `|| true` keeps
+# `set -e` from killing the script on that expected non-zero exit; the
+# real success/failure decision is made by grepping the output.
+#
+# `</dev/null` is critical under `curl | bash`: ssh inherits stdin from
+# bash (which is the script pipe), and would otherwise consume the rest
+# of the script and forward it to GitHub. Bash then hits EOF on the next
+# line read and exits cleanly with code 0 — the exact "silent exit" bug
+# from issue #60.
+ssh_output=$(ssh -T \
+  -o BatchMode=yes \
+  -o ConnectTimeout=10 \
+  -o StrictHostKeyChecking=accept-new \
+  git@github.com </dev/null 2>&1 || true)
+if ! printf '%s' "$ssh_output" | grep -q "successfully authenticated"; then
+  echo
+  echo "================================================================"
+  echo "SSH to git@github.com did not succeed. ssh said:"
+  echo
   echo "$ssh_output"
   echo
-  echo "Confirm the key was added on GitHub, then re-run."
+  echo "Common causes:"
+  echo "  - The SSH key wasn't actually added on https://github.com/settings/ssh"
+  echo "  - Outbound port 22 is blocked on this network"
+  echo "  - The wrong key was added (compare against the line printed above)"
+  echo "================================================================"
   exit 1
 fi
-echo "SSH auth OK."
+echo "  SSH auth OK."
 
 echo "[4/5] cloning DevOps repo to $REPO_DIR..."
 mkdir -p "$(dirname "$REPO_DIR")"
+# Same `</dev/null` reasoning as ssh -T above: git's underlying ssh
+# would otherwise eat the rest of the script under `curl | bash`.
 if [ -d "$REPO_DIR/.git" ]; then
   echo "already present; pulling latest..."
-  git -C "$REPO_DIR" pull --ff-only
+  git -C "$REPO_DIR" pull --ff-only </dev/null
 elif [ -e "$REPO_DIR" ]; then
   echo "error: $REPO_DIR exists but is not a git repo. Move it aside and re-run."
   exit 1
 else
-  git clone "$REPO_SSH" "$REPO_DIR"
+  git clone "$REPO_SSH" "$REPO_DIR" </dev/null
 fi
 
 echo "[5/5] handing off to setup.sh..."
